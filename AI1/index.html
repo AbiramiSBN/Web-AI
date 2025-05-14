@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Browser-Based AI Model Training</title>
+        <!-- Inline CSS (combined styles.css) -->
+        <style>
+            /* Reset some basic styling */
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            body {
+                font-family: Arial, sans-serif;
+                background-color: #f4f4f4;
+                line-height: 1.6;
+                color: #333;
+            }
+
+            header {
+                background-color: #2e86c1;
+                color: #fff;
+                padding: 1rem;
+                text-align: center;
+            }
+
+            main {
+                padding: 1rem;
+                max-width: 900px;
+                margin: auto;
+            }
+
+            section {
+                background: #fff;
+                border: 1px solid #ddd;
+                padding: 1rem;
+                border-radius: 8px;
+                margin-bottom: 1.5rem;
+            }
+
+            .form-control {
+                margin-bottom: 1rem;
+                display: flex;
+                align-items: center;
+            }
+
+            .form-control label {
+                flex: 1;
+                margin-right: 0.5rem;
+                font-weight: bold;
+            }
+
+            .form-control input {
+                flex: 2;
+                padding: 0.5rem;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+
+            #imageContainer {
+                margin-top: 1rem;
+                text-align: center;
+            }
+
+            #imageContainer img {
+                max-width: 100%;
+                height: auto;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+
+            #trainingChart {
+                max-width: 600px;
+                margin: 1rem auto;
+            }
+        </style>
+        <!-- Load TensorFlow.js from CDN -->
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+        <!-- Load Chart.js for realtime training feedback charts -->
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    </head>
+    <body>
+        <header>
+            <h1>Browser-Based AI Model Training</h1>
+        </header>
+        <main>
+            <!-- Inference Section: Upload image & display classification results -->
+            <section id="inferenceSection">
+                <h2>Inference</h2>
+                <p>Upload an image for classification:</p>
+                <input type="file" id="imageUpload" accept="image/*" />
+                <div id="imageContainer"></div>
+                <div id="inferenceResults"></div>
+            </section>
+
+            <!-- Transfer Learning Section: Controls for retraining the model -->
+            <section id="transferLearningSection">
+                <h2>Transfer Learning</h2>
+                <form id="trainingForm">
+                    <div class="form-control">
+                        <label for="freezeBase">Freeze Base Layers:</label>
+                        <input type="checkbox" id="freezeBase" checked />
+                    </div>
+                    <div class="form-control">
+                        <label for="numUnits">New Dense Layer Units:</label>
+                        <input
+                            type="number"
+                            id="numUnits"
+                            value="100"
+                            min="1"
+                        />
+                    </div>
+                    <div class="form-control">
+                        <label for="epochs">Training Epochs:</label>
+                        <input type="number" id="epochs" value="5" min="1" />
+                    </div>
+                    <button type="submit" id="trainButton">
+                        Retrain Model
+                    </button>
+                </form>
+                <!-- Chart.js canvas for real‑time training metrics -->
+                <canvas id="trainingChart"></canvas>
+            </section>
+
+            <!-- Model Export Section: Download the fine‑tuned model -->
+            <section id="exportSection">
+                <h2>Model Export</h2>
+                <button id="exportButton">Export Model</button>
+            </section>
+        </main>
+        <!-- Inline JavaScript (combined app.js) -->
+        <script type="module">
+            // Global variables to hold our models and chart instance
+            let mobilenet;
+            let transferModel;
+            let trainingChart;
+
+            // Load the pre-trained MobileNet model from the TensorFlow.js model zoo
+            async function loadMobileNet() {
+                // The URL below is for MobileNet V1 (width multiplier 0.25) with input size 224x224
+                mobilenet = await tf.loadLayersModel(
+                    "https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json",
+                );
+                console.log("MobileNet loaded.");
+            }
+            loadMobileNet();
+
+            // Initialize Chart.js for realtime training feedback
+            function initChart() {
+                const ctx = document
+                    .getElementById("trainingChart")
+                    .getContext("2d");
+                trainingChart = new Chart(ctx, {
+                    type: "line",
+                    data: {
+                        labels: [],
+                        datasets: [
+                            {
+                                label: "Loss",
+                                backgroundColor: "rgba(255, 99, 132, 0.2)",
+                                borderColor: "rgb(255, 99, 132)",
+                                fill: false,
+                                data: [],
+                            },
+                            {
+                                label: "Accuracy",
+                                backgroundColor: "rgba(54, 162, 235, 0.2)",
+                                borderColor: "rgb(54, 162, 235)",
+                                fill: false,
+                                data: [],
+                            },
+                        ],
+                    },
+                    options: {
+                        scales: {
+                            x: {
+                                title: { display: true, text: "Epoch" },
+                            },
+                            y: {
+                                title: { display: true, text: "Value" },
+                            },
+                        },
+                    },
+                });
+            }
+            initChart();
+
+            /**
+             * Preprocess the uploaded image.
+             * This function resizes the image to 224x224 (the input size MobileNet expects)
+             * and converts it into a tensor.
+             */
+            function preprocessImage(image) {
+                return tf.tidy(() => {
+                    const tensor = tf.browser
+                        .fromPixels(image)
+                        .resizeNearestNeighbor([224, 224])
+                        .toFloat()
+                        .expandDims(); // Shape: [1, 224, 224, 3]
+                    return tensor;
+                });
+            }
+
+            // Event listener for image upload to perform inference
+            document
+                .getElementById("imageUpload")
+                .addEventListener("change", (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const img = new Image();
+                        img.src = e.target.result;
+                        img.onload = () => {
+                            // Display the image on the page
+                            const container =
+                                document.getElementById("imageContainer");
+                            container.innerHTML = "";
+                            container.appendChild(img);
+
+                            // Preprocess the image to match MobileNet expected input
+                            const inputTensor = preprocessImage(img);
+
+                            // Use the transfer model if retrained; otherwise, use MobileNet
+                            const modelToUse = transferModel
+                                ? transferModel
+                                : mobilenet;
+                            const prediction = modelToUse.predict(inputTensor);
+
+                            // Convert prediction to array and display results
+                            prediction.array().then((predArray) => {
+                                document.getElementById(
+                                    "inferenceResults",
+                                ).innerHTML =
+                                    `<pre>${JSON.stringify(predArray, null, 2)}</pre>`;
+                            });
+                        };
+                    };
+                    reader.readAsDataURL(file);
+                });
+
+            /**
+             * Create a new transfer learning model by stacking additional dense layers on top
+             * of the pre-trained MobileNet.
+             *
+             * Transfer Learning concept:
+             * - We freeze the base layers (MobileNet) if desired.
+             * - We add new dense layers to learn task‑specific features.
+             */
+            function createTransferModel(numUnits, freezeBase) {
+                // Freeze or unfreeze base layers based on the user's choice
+                mobilenet.layers.forEach(
+                    (layer) => (layer.trainable = !freezeBase),
+                );
+
+                // Take the output from MobileNet and add new layers
+                const x = mobilenet.outputs[0];
+                const dense = tf.layers
+                    .dense({
+                        units: numUnits,
+                        activation: "relu",
+                        name: "dense",
+                    })
+                    .apply(x);
+                // For demonstration, assume a 2-class problem with a softmax output.
+                const predictions = tf.layers
+                    .dense({
+                        units: 2,
+                        activation: "softmax",
+                        name: "predictions",
+                    })
+                    .apply(dense);
+
+                // Create a new model that combines MobileNet with the new layers
+                const model = tf.model({
+                    inputs: mobilenet.inputs,
+                    outputs: predictions,
+                });
+                return model;
+            }
+
+            // Event listener for the training form to retrain the model with new layers
+            document
+                .getElementById("trainingForm")
+                .addEventListener("submit", async (event) => {
+                    event.preventDefault();
+                    const freezeBase =
+                        document.getElementById("freezeBase").checked;
+                    const numUnits = parseInt(
+                        document.getElementById("numUnits").value,
+                    );
+                    const epochs = parseInt(
+                        document.getElementById("epochs").value,
+                    );
+
+                    // Create the transfer learning model on top of MobileNet
+                    transferModel = createTransferModel(numUnits, freezeBase);
+
+                    // Compile the model with an optimizer, loss function, and accuracy metrics.
+                    transferModel.compile({
+                        optimizer: tf.train.adam(),
+                        loss: "categoricalCrossentropy",
+                        metrics: ["accuracy"],
+                    });
+
+                    // For illustration, create dummy training data.
+                    // In a real application, you would collect user-labeled images.
+                    const numSamples = 30;
+                    const xs = tf.randomNormal([numSamples, 224, 224, 3]);
+                    // Generate random labels (binary classification for demonstration)
+                    const randomLabels = Array.from(
+                        { length: numSamples },
+                        () => Math.floor(Math.random() * 2),
+                    );
+                    const ys = tf.oneHot(tf.tensor1d(randomLabels, "int32"), 2);
+
+                    // Reset the chart data for the new training session
+                    trainingChart.data.labels = [];
+                    trainingChart.data.datasets[0].data = [];
+                    trainingChart.data.datasets[1].data = [];
+                    trainingChart.update();
+
+                    // Train the model and update training feedback in realtime
+                    await transferModel.fit(xs, ys, {
+                        epochs: epochs,
+                        callbacks: {
+                            onEpochEnd: async (epoch, logs) => {
+                                trainingChart.data.labels.push(epoch + 1);
+                                trainingChart.data.datasets[0].data.push(
+                                    logs.loss,
+                                );
+                                // Some versions report accuracy as 'acc', others as 'accuracy'
+                                trainingChart.data.datasets[1].data.push(
+                                    logs.accuracy || logs.acc,
+                                );
+                                trainingChart.update();
+                            },
+                        },
+                    });
+
+                    console.log("Retraining complete!");
+                });
+
+            // Event listener for exporting the fine-tuned model
+            document
+                .getElementById("exportButton")
+                .addEventListener("click", async () => {
+                    if (!transferModel) {
+                        alert("Please retrain the model first!");
+                        return;
+                    }
+                    // Use tfjs's built-in model saving to trigger download of JSON and weight files.
+                    await transferModel.save("downloads://my-fine-tuned-model");
+                });
+
+            /*
+    README / Setup & Usage Instructions:
+
+    This web application demonstrates an end-to-end AI training and retraining workflow entirely in the browser using TensorFlow.js.
+
+    Setup & Hosting:
+    1. Save this file as index.html.
+    2. In your terminal, navigate to the directory containing index.html and run:
+         npx http-server
+       (Alternatively, use any static file server of your choice.)
+    3. Open your browser and navigate to the URL provided by http-server (typically http://localhost:8080).
+
+    Usage:
+    - The "Inference" section allows you to upload or drag-and-drop an image for classification. The app resizes the image to 224x224 pixels and uses the pre-trained MobileNet by default.
+    - In the "Transfer Learning" section, adjust the controls to freeze/unfreeze MobileNet base layers, set the number of units in the new dense layer, and choose the training epochs. Click "Retrain Model" to run the training loop on sample dummy data. Training loss and accuracy are displayed by Chart.js in real time.
+    - After retraining, use the "Export Model" button to download the fine-tuned model (JSON and binary weight files).
+
+    Swapping in a Custom Pre‐converted Model:
+    - To use a different pre‑converted TensorFlow.js model, update the URL in loadMobileNet() accordingly.
+    - Ensure that the new model’s input size and preprocessing steps match those in preprocessImage().
+
+    Key ML Concepts:
+    - **Model Loading:** Uses tf.loadLayersModel() to load a pre‑trained MobileNet.
+    - **Layer Freezing:** Freezes mobileNet layers (layer.trainable=false) when adding new dense layers.
+    - **Training Loop & Feedback:** transferModel.fit() trains the custom layers; onEpochEnd callbacks update realtime charts.
+    - **Model Export:** tfjs model.save() exports the fine‑tuned model for later use.
+
+    Enjoy experimenting with transfer learning directly in your browser!
+    */
+        </script>
+    </body>
+</html>

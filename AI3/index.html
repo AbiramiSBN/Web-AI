@@ -1,0 +1,203 @@
+<!-- index.html -->
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>TensorFlow.js Image Classification</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+            }
+
+            .container {
+                max-width: 800px;
+                margin: 40px auto;
+                padding: 20px;
+                background-color: #f9f9f9;
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            }
+
+            #inference-ui,
+            #transfer-learning-ui {
+                margin-bottom: 20px;
+            }
+
+            #classification-results,
+            #training-feedback {
+                margin-top: 10px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Image Classification</h1>
+            <div id="inference-ui">
+                <input type="file" id="image-input" accept="image/*" />
+                <button id="classify-btn">Classify</button>
+                <div id="classification-results"></div>
+            </div>
+            <div id="transfer-learning-ui">
+                <button id="freeze-base-layers-btn">Freeze Base Layers</button>
+                <input type="number" id="num-dense-layers" value="2" />
+                <button id="retrain-model-btn">Retrain Model</button>
+                <div id="training-feedback"></div>
+            </div>
+            <button id="export-model-btn">Export Model</button>
+        </div>
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@latest"></script>
+        <script>
+            // Load pre-trained MobileNet model
+            async function loadModel() {
+                const model = await mobilenet.load();
+                return model;
+            }
+
+            // Set up inference UI
+            async function setupInferenceUI(model) {
+                const imageInput = document.getElementById("image-input");
+                const classifyBtn = document.getElementById("classify-btn");
+                const classificationResults = document.getElementById(
+                    "classification-results",
+                );
+
+                classifyBtn.addEventListener("click", async () => {
+                    const image = await getImage(imageInput.files[0]);
+                    const predictions = await model.classify(image);
+                    classificationResults.innerText = predictions
+                        .map(
+                            (p) =>
+                                `${p.className}: ${p.probability.toFixed(2)}`,
+                        )
+                        .join("\n");
+                });
+            }
+
+            // Set up transfer learning UI
+            async function setupTransferLearningUI(model) {
+                const freezeBaseLayersBtn = document.getElementById(
+                    "freeze-base-layers-btn",
+                );
+                const numDenseLayersInput =
+                    document.getElementById("num-dense-layers");
+                const retrainModelBtn =
+                    document.getElementById("retrain-model-btn");
+                const trainingFeedback =
+                    document.getElementById("training-feedback");
+
+                let frozenModel;
+                freezeBaseLayersBtn.addEventListener("click", async () => {
+                    // Freeze base layers of the model
+                    frozenModel = tf.sequential();
+                    for (let i = 0; i < model.layers.length - 1; i++) {
+                        frozenModel.add(model.layers[i]);
+                    }
+                    for (let layer of frozenModel.layers) {
+                        layer.trainable = false;
+                    }
+                });
+
+                retrainModelBtn.addEventListener("click", async () => {
+                    if (!frozenModel) {
+                        alert("Freeze base layers first!");
+                        return;
+                    }
+
+                    // Add new dense layers
+                    const numDenseLayers = parseInt(numDenseLayersInput.value);
+                    for (let i = 0; i < numDenseLayers; i++) {
+                        frozenModel.add(
+                            tf.layers.dense({ units: 128, activation: "relu" }),
+                        );
+                    }
+                    frozenModel.add(
+                        tf.layers.dense({ units: 10, activation: "softmax" }),
+                    );
+
+                    // Compile the model
+                    frozenModel.compile({
+                        optimizer: tf.optimizers.adam(),
+                        loss: "categoricalCrossentropy",
+                        metrics: ["accuracy"],
+                    });
+
+                    // Train the model
+                    const images = []; // Assume we have an array of images
+                    const labels = []; // Assume we have an array of labels
+                    const xs = tf.stack(
+                        images.map((image) => tf.browser.fromPixels(image)),
+                    );
+                    const ys = tf.stack(
+                        labels.map((label) => tf.oneHot(label, 10)),
+                    );
+                    await frozenModel.fit(xs, ys, {
+                        epochs: 10,
+                        batchSize: 32,
+                        callbacks: {
+                            onEpochEnd: async (epoch, logs) => {
+                                trainingFeedback.innerText = `Epoch ${epoch + 1}: Loss = ${logs.loss.toFixed(4)}, Accuracy = ${logs.acc.toFixed(4)}`;
+                            },
+                        },
+                    });
+                });
+            }
+
+            // Set up model export UI
+            async function setupModelExportUI(model) {
+                const exportModelBtn =
+                    document.getElementById("export-model-btn");
+
+                exportModelBtn.addEventListener("click", async () => {
+                    const weights = model.getWeights();
+                    const jsonModel = model.toJSON();
+                    const blob = new Blob([JSON.stringify(jsonModel)], {
+                        type: "application/json",
+                    });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = "model.json";
+                    a.click();
+
+                    const weightBlob = new Blob(
+                        weights.map((weight) => weight.dataSync()),
+                        { type: "application/octet-stream" },
+                    );
+                    const weightUrl = URL.createObjectURL(weightBlob);
+                    const weightA = document.createElement("a");
+                    weightA.href = weightUrl;
+                    weightA.download = "weights.bin";
+                    weightA.click();
+                });
+            }
+
+            // Helper function to get image tensor from file
+            async function getImage(file) {
+                const img = document.createElement("img");
+                img.src = URL.createObjectURL(file);
+                await new Promise((resolve) => (img.onload = resolve));
+                const tensor = tf.browser.fromPixels(img);
+                return tensor;
+            }
+
+            // Main function
+            async function main() {
+                const model = await loadModel();
+                setupInferenceUI(model);
+                setupTransferLearningUI(model);
+                setupModelExportUI(model);
+            }
+
+            main();
+
+            // README
+            // To run this application, save the above file as `index.html` and open it in a browser.
+            // To test retraining, you'll need to provide your own images and labels.
+            // You can swap in a custom pre-converted model by modifying the `loadModel` function.
+        </script>
+    </body>
+</html>

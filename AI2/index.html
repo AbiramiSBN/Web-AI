@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser ML</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-vis@1.5.1/dist/tfjs-vis.umd.min.js"></script>
+    <style>
+        :root {
+            --primary: #2c3e50;
+            --secondary: #3498db;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #ecf0f1;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .upload-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .drop-zone {
+            border: 3px dashed var(--primary);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+
+        .drop-zone:hover {
+            border-color: var(--secondary);
+        }
+
+        .image-preview img {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 5px;
+        }
+
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .control-group {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        button {
+            background: var(--secondary);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: opacity 0.3s;
+        }
+
+        button:hover {
+            opacity: 0.8;
+        }
+
+        .charts {
+            margin: 20px 0;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+        }
+
+        #predictions {
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Browser ML Trainer</h1>
+
+        <div class="upload-section">
+            <div id="drop-zone" class="drop-zone">
+                <input type="file" id="file-input" accept="image/*">
+                <p>Drag & drop images or click to upload</p>
+            </div>
+            <div class="image-preview" id="image-preview"></div>
+        </div>
+
+        <div class="results">
+            <h2>Predictions</h2>
+            <div id="predictions"></div>
+        </div>
+
+        <div class="controls">
+            <h2>Transfer Learning</h2>
+            <div class="control-group">
+                <label>Dense Units:</label>
+                <select id="dense-units">
+                    <option value="32">32</option>
+                    <option value="64" selected>64</option>
+                    <option value="128">128</option>
+                </select>
+
+                <label>Epochs:</label>
+                <input type="number" id="epochs" value="5" min="1">
+
+                <button id="modify-model">Modify Model</button>
+                <button id="train-model">Start Training</button>
+            </div>
+        </div>
+
+        <div id="training-charts" class="charts"></div>
+
+        <div class="export">
+            <button id="export-model">Download Model</button>
+        </div>
+    </div>
+
+    <script>
+        let model;
+        let trainingData = [];
+        const MOBILENET_URL = 'https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json';
+
+        async function loadBaseModel() {
+            model = await tf.loadLayersModel(MOBILENET_URL);
+            console.log('Base MobileNet loaded');
+        }
+
+        async function classifyImage(imgElement) {
+            const tensor = preprocessImage(imgElement);
+            const predictions = await model.predict(tensor).data();
+            displayPredictions(predictions);
+            tensor.dispose();
+        }
+
+        function preprocessImage(imgElement) {
+            return tf.tidy(() => {
+                return tf.browser.fromPixels(imgElement)
+                    .resizeBilinear([224, 224])
+                    .toFloat()
+                    .div(255)
+                    .expandDims();
+            });
+        }
+
+        function modifyModel() {
+            const baseLayers = model.layers.slice(0, -1);
+            baseLayers.forEach(layer => layer.trainable = false);
+
+            const units = parseInt(document.getElementById('dense-units').value);
+            const newModel = tf.sequential({
+                layers: [
+                    ...baseLayers,
+                    tf.layers.dense({ units, activation: 'relu' }),
+                    tf.layers.dense({ units: 2, activation: 'softmax' })
+                ]
+            });
+
+            model = newModel;
+            console.log('Model modified for transfer learning');
+        }
+
+        async function startTraining() {
+            if (trainingData.length === 0) return alert('Upload training images first');
+
+            model.compile({
+                optimizer: tf.train.adam(),
+                loss: 'categoricalCrossentropy',
+                metrics: ['accuracy']
+            });
+
+            const { xs, ys } = prepareTrainingData();
+
+            await model.fit(xs, ys, {
+                epochs: parseInt(document.getElementById('epochs').value),
+                batchSize: 8,
+                callbacks: {
+                    onEpochEnd: (epoch, logs) => {
+                        tfvis.show.history(
+                            document.getElementById('training-charts'),
+                            [{ epoch, ...logs }],
+                            ['loss', 'accuracy']
+                        );
+                    }
+                }
+            });
+
+            tf.dispose([xs, ys]);
+        }
+
+        function prepareTrainingData() {
+            const xs = tf.concat(trainingData.map(d => d.tensor));
+            const ys = tf.oneHot(tf.tensor1d(trainingData.map(d => d.label), 'int32'), 2);
+            return { xs, ys };
+        }
+
+        async function handleImageUpload(file) {
+            const img = await loadImage(file);
+            const tensor = preprocessImage(img);
+
+            trainingData.push({
+                tensor: tensor,
+                label: 1 // Simplified labeling
+            });
+
+            document.getElementById('image-preview').appendChild(img);
+            classifyImage(img);
+        }
+
+        function loadImage(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.src = e.target.result;
+                    img.onload = () => resolve(img);
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function displayPredictions(predictions) {
+            const container = document.getElementById('predictions');
+            container.innerHTML = `<strong>Predictions:</strong> ${Array.from(predictions)
+                .map((p, i) => `${i}: ${p.toFixed(4)}`)
+                .join(' | ')}`;
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadBaseModel();
+
+            document.getElementById('drop-zone').ondrop = (e) => {
+                e.preventDefault();
+                handleImageUpload(e.dataTransfer.files[0]);
+            };
+
+            document.getElementById('file-input').onchange = (e) => {
+                handleImageUpload(e.target.files[0]);
+            };
+
+            document.getElementById('modify-model').onclick = modifyModel;
+            document.getElementById('train-model').onclick = startTraining;
+            document.getElementById('export-model').onclick = () => {
+                model.save('downloads://retrained-model');
+            };
+        });
+
+  </script>
+</body>
+</html>

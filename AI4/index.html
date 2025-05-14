@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <title>
+            In-Browser Transfer Learning with MobileNet & TensorFlow.js
+        </title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <!-- TensorFlow.js CDN -->
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+        <!-- MobileNet Pretrained Model -->
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet"></script>
+        <!-- Chart.js for real-time charts -->
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {
+                font-family: system-ui, sans-serif;
+                margin: 0;
+                padding: 0;
+                background: #f9fafb;
+                color: #222;
+            }
+
+            main {
+                max-width: 800px;
+                margin: 2rem auto;
+                padding: 2rem;
+                background: #fff;
+                border-radius: 12px;
+                box-shadow: 0 2px 16px rgba(0, 0, 0, 0.05);
+            }
+
+            h1,
+            h2 {
+                text-align: center;
+            }
+
+            section {
+                margin-bottom: 2rem;
+                padding-bottom: 1rem;
+                border-bottom: 1px solid #eee;
+            }
+
+            input[type="file"] {
+                margin: 0.5rem 0;
+            }
+
+            .drop-zone {
+                border: 2px dashed #888;
+                border-radius: 8px;
+                padding: 1rem;
+                text-align: center;
+                color: #888;
+                background: #f3f4f6;
+                margin-bottom: 1rem;
+                cursor: pointer;
+                transition: background 0.2s;
+            }
+
+            .drop-zone.dragover {
+                background: #e0e7ff;
+            }
+
+            #preview img {
+                max-width: 140px;
+                max-height: 140px;
+                margin: 0.5rem;
+                border-radius: 8px;
+                border: 1px solid #ddd;
+            }
+
+            #results {
+                margin-top: 1rem;
+                font-size: 1.1rem;
+            }
+
+            form label {
+                display: block;
+                margin: 0.5rem 0 0.2rem;
+            }
+
+            form input,
+            form select {
+                margin-left: 0.5rem;
+            }
+
+            #sample-data-instructions {
+                margin: 1rem 0;
+                background: #f1f5f9;
+                padding: 1rem;
+                border-radius: 8px;
+            }
+
+            #sample-list {
+                list-style: none;
+                padding: 0;
+                margin: 0.5rem 0;
+            }
+
+            #sample-list li {
+                font-size: 0.95rem;
+                margin-bottom: 0.2rem;
+            }
+
+            #training-chart {
+                max-width: 100%;
+                height: 260px;
+                margin: 1rem 0;
+            }
+
+            #training-status {
+                font-weight: bold;
+                margin: 0.5rem 0;
+                color: #2563eb;
+            }
+
+            button {
+                margin-top: 1rem;
+                background: #2563eb;
+                color: #fff;
+                border: none;
+                border-radius: 6px;
+                padding: 0.6rem 1.2rem;
+                font-size: 1rem;
+                cursor: pointer;
+                transition: background 0.2s;
+            }
+
+            button:disabled {
+                background: #a5b4fc;
+                cursor: not-allowed;
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <h1>In-Browser Transfer Learning: MobileNet + TensorFlow.js</h1>
+            <section id="inference-section">
+                <h2>Image Classification</h2>
+                <input
+                    type="file"
+                    id="image-upload"
+                    accept="image/*"
+                    multiple
+                />
+                <div id="image-drop" class="drop-zone">
+                    Drag & Drop Images Here
+                </div>
+                <div id="preview"></div>
+                <div id="results"></div>
+            </section>
+
+            <section id="transfer-section">
+                <h2>Transfer Learning</h2>
+                <form id="transfer-form">
+                    <label>
+                        Freeze base layers:
+                        <input type="checkbox" id="freeze-base" checked />
+                    </label>
+                    <label>
+                        New dense layer units:
+                        <input
+                            type="number"
+                            id="dense-units"
+                            value="64"
+                            min="1"
+                            max="512"
+                        />
+                    </label>
+                    <label>
+                        Classes (comma-separated):
+                        <input
+                            type="text"
+                            id="class-labels"
+                            placeholder="e.g. cat,dog,car"
+                        />
+                    </label>
+                    <label>
+                        Epochs:
+                        <input
+                            type="number"
+                            id="epochs"
+                            value="5"
+                            min="1"
+                            max="100"
+                        />
+                    </label>
+                    <button type="submit">Start Retraining</button>
+                </form>
+                <div id="sample-data-instructions">
+                    <p>
+                        Upload labeled images for each class. Select class label
+                        before uploading:
+                    </p>
+                    <select id="current-class"></select>
+                    <input
+                        type="file"
+                        id="sample-upload"
+                        accept="image/*"
+                        multiple
+                    />
+                    <ul id="sample-list"></ul>
+                </div>
+                <canvas id="training-chart"></canvas>
+                <div id="training-status"></div>
+                <button id="export-model" disabled>
+                    Export Fine-Tuned Model
+                </button>
+            </section>
+        </main>
+        <script type="module">
+            // app.js
+            // Main logic for in-browser transfer learning with MobileNet + TensorFlow.js
+
+            // --- GLOBAL STATE ---
+            let mobilenetModel; // Pre-trained base model
+            let transferModel; // Model for transfer learning
+            let classLabels = [];
+            let sampleData = {}; // {className: [ImageDataURL, ...]}
+            let trainingChart;
+            let chartData = { loss: [], acc: [] };
+            let trainingInProgress = false;
+
+            // --- UI ELEMENTS ---
+            const imageUpload = document.getElementById("image-upload");
+            const imageDrop = document.getElementById("image-drop");
+            const previewDiv = document.getElementById("preview");
+            const resultsDiv = document.getElementById("results");
+
+            const transferForm = document.getElementById("transfer-form");
+            const freezeBaseInput = document.getElementById("freeze-base");
+            const denseUnitsInput = document.getElementById("dense-units");
+            const classLabelsInput = document.getElementById("class-labels");
+            const epochsInput = document.getElementById("epochs");
+
+            const currentClassSelect = document.getElementById("current-class");
+            const sampleUpload = document.getElementById("sample-upload");
+            const sampleList = document.getElementById("sample-list");
+            const trainingStatus = document.getElementById("training-status");
+            const exportBtn = document.getElementById("export-model");
+            const trainingChartCanvas =
+                document.getElementById("training-chart");
+
+            // --- 1. LOAD PRETRAINED MOBILENET ---
+            async function loadMobileNet() {
+                // Load MobileNet from TensorFlow.js model zoo
+                mobilenetModel = await window.mobilenet.load({
+                    version: 2,
+                    alpha: 1.0,
+                });
+                // Remove the final classification layer for transfer learning
+                // We'll use mobilenetModel.model (tf.Model) for access to layers
+            }
+            loadMobileNet();
+
+            // --- 2. IMAGE UPLOAD & INFERENCE ---
+            function displayImage(file, targetDiv) {
+                const img = document.createElement("img");
+                img.src = URL.createObjectURL(file);
+                img.onload = () => URL.revokeObjectURL(img.src);
+                targetDiv.appendChild(img);
+                return img;
+            }
+
+            async function classifyImage(img) {
+                if (!mobilenetModel) {
+                    resultsDiv.textContent = "MobileNet not loaded yet.";
+                    return;
+                }
+                // Run inference
+                const predictions = await mobilenetModel.classify(img);
+                resultsDiv.innerHTML = predictions
+                    .map(
+                        (p) =>
+                            `<div><strong>${p.className}</strong>: ${(p.probability * 100).toFixed(2)}%</div>`,
+                    )
+                    .join("");
+            }
+
+            imageUpload.addEventListener("change", async (e) => {
+                previewDiv.innerHTML = "";
+                resultsDiv.innerHTML = "";
+                for (const file of e.target.files) {
+                    const img = displayImage(file, previewDiv);
+                    img.onload = () => classifyImage(img);
+                }
+            });
+
+            // Drag & drop
+            imageDrop.addEventListener("dragover", (e) => {
+                e.preventDefault();
+                imageDrop.classList.add("dragover");
+            });
+            imageDrop.addEventListener("dragleave", (e) => {
+                imageDrop.classList.remove("dragover");
+            });
+            imageDrop.addEventListener("drop", (e) => {
+                e.preventDefault();
+                imageDrop.classList.remove("dragover");
+                previewDiv.innerHTML = "";
+                resultsDiv.innerHTML = "";
+                for (const file of e.dataTransfer.files) {
+                    const img = displayImage(file, previewDiv);
+                    img.onload = () => classifyImage(img);
+                }
+            });
+
+            // --- 3. TRANSFER LEARNING UI ---
+            classLabelsInput.addEventListener("change", () => {
+                classLabels = classLabelsInput.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                updateClassSelect();
+                updateSampleList();
+            });
+            function updateClassSelect() {
+                currentClassSelect.innerHTML = "";
+                classLabels.forEach((label) => {
+                    const opt = document.createElement("option");
+                    opt.value = label;
+                    opt.textContent = label;
+                    currentClassSelect.appendChild(opt);
+                });
+            }
+            function updateSampleList() {
+                sampleList.innerHTML = "";
+                classLabels.forEach((label) => {
+                    const count = sampleData[label]?.length || 0;
+                    const li = document.createElement("li");
+                    li.textContent = `${label}: ${count} samples`;
+                    sampleList.appendChild(li);
+                });
+            }
+
+            // --- 4. SAMPLE DATA COLLECTION ---
+            sampleUpload.addEventListener("change", (e) => {
+                const label = currentClassSelect.value;
+                if (!label) return;
+                if (!sampleData[label]) sampleData[label] = [];
+                for (const file of e.target.files) {
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        sampleData[label].push(evt.target.result);
+                        updateSampleList();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+
+            // --- 5. BUILD TRANSFER MODEL ---
+            function buildTransferModel({
+                freezeBase,
+                denseUnits,
+                numClasses,
+            }) {
+                // Use MobileNet as feature extractor
+                const mobilenetLayer = mobilenetModel.model;
+                mobilenetLayer.trainable = !freezeBase;
+                // Remove MobileNet's top classification layer
+                const x = mobilenetLayer.outputs[0];
+                // Add new dense layer(s)
+                let y = tf.layers.flatten().apply(x);
+                y = tf.layers
+                    .dense({ units: denseUnits, activation: "relu" })
+                    .apply(y);
+                y = tf.layers
+                    .dense({ units: numClasses, activation: "softmax" })
+                    .apply(y);
+                // New model: inputs = MobileNet's input, outputs = new dense
+                const model = tf.model({
+                    inputs: mobilenetLayer.inputs,
+                    outputs: y,
+                });
+                model.compile({
+                    optimizer: tf.train.adam(0.0001),
+                    loss: "categoricalCrossentropy",
+                    metrics: ["accuracy"],
+                });
+                return model;
+            }
+
+            // --- 6. DATA PREPROCESSING ---
+            async function imageToTensor(dataURL) {
+                return new Promise((resolve) => {
+                    const img = new window.Image();
+                    img.crossOrigin = "";
+                    img.src = dataURL;
+                    img.onload = () => {
+                        // MobileNet expects 224x224 RGB
+                        const tensor = tf.browser
+                            .fromPixels(img)
+                            .resizeBilinear([224, 224])
+                            .toFloat()
+                            .div(255)
+                            .expandDims(0);
+                        resolve(tensor);
+                    };
+                });
+            }
+
+            async function getDataset() {
+                // Returns {xs: tf.Tensor, ys: tf.Tensor}
+                const xsArr = [];
+                const ysArr = [];
+                for (let i = 0; i < classLabels.length; ++i) {
+                    const label = classLabels[i];
+                    const samples = sampleData[label] || [];
+                    for (const dataURL of samples) {
+                        const tensor = await imageToTensor(dataURL);
+                        xsArr.push(tensor);
+                        const y = tf.oneHot(i, classLabels.length);
+                        ysArr.push(y);
+                    }
+                }
+                if (xsArr.length === 0) throw new Error("No training data.");
+                const xs = tf.concat(xsArr, 0);
+                const ys = tf.stack(ysArr);
+                xsArr.forEach((t) => t.dispose());
+                ysArr.forEach((t) => t.dispose());
+                return { xs, ys };
+            }
+
+            // --- 7. TRAINING FEEDBACK CHART ---
+            function setupChart() {
+                chartData = { loss: [], acc: [] };
+                if (trainingChart) trainingChart.destroy();
+                trainingChart = new Chart(trainingChartCanvas, {
+                    type: "line",
+                    data: {
+                        labels: [],
+                        datasets: [
+                            {
+                                label: "Loss",
+                                data: [],
+                                borderColor: "#ef4444",
+                                fill: false,
+                            },
+                            {
+                                label: "Accuracy",
+                                data: [],
+                                borderColor: "#22c55e",
+                                fill: false,
+                            },
+                        ],
+                    },
+                    options: {
+                        responsive: true,
+                        animation: false,
+                        scales: { y: { beginAtZero: true, max: 1 } },
+                    },
+                });
+            }
+            function updateChart(epoch, loss, acc) {
+                trainingChart.data.labels.push(epoch);
+                trainingChart.data.datasets[0].data.push(loss);
+                trainingChart.data.datasets[1].data.push(acc);
+                trainingChart.update();
+            }
+
+            // --- 8. TRAINING LOOP ---
+            transferForm.addEventListener("submit", async (e) => {
+                e.preventDefault();
+                if (trainingInProgress) return;
+                if (!mobilenetModel) {
+                    trainingStatus.textContent = "MobileNet not loaded.";
+                    return;
+                }
+                classLabels = classLabelsInput.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                if (classLabels.length < 2) {
+                    trainingStatus.textContent =
+                        "Please specify at least two class labels.";
+                    return;
+                }
+                updateClassSelect();
+                updateSampleList();
+                trainingStatus.textContent = "Preparing data...";
+                try {
+                    const { xs, ys } = await getDataset();
+                    const freezeBase = freezeBaseInput.checked;
+                    const denseUnits = parseInt(denseUnitsInput.value, 10);
+                    const numClasses = classLabels.length;
+                    transferModel = buildTransferModel({
+                        freezeBase,
+                        denseUnits,
+                        numClasses,
+                    });
+                    setupChart();
+                    trainingInProgress = true;
+                    exportBtn.disabled = true;
+                    trainingStatus.textContent = "Training...";
+                    await transferModel.fit(xs, ys, {
+                        epochs: parseInt(epochsInput.value, 10),
+                        shuffle: true,
+                        batchSize: 8,
+                        callbacks: {
+                            onEpochEnd: (epoch, logs) => {
+                                updateChart(
+                                    epoch + 1,
+                                    logs.loss,
+                                    logs.acc ?? logs.accuracy,
+                                );
+                                trainingStatus.textContent = `Epoch ${epoch + 1}: loss=${logs.loss.toFixed(4)}, acc=${(logs.acc ?? logs.accuracy).toFixed(4)}`;
+                            },
+                        },
+                    });
+                    trainingStatus.textContent = "Training complete!";
+                    exportBtn.disabled = false;
+                    xs.dispose();
+                    ys.dispose();
+                } catch (err) {
+                    trainingStatus.textContent = "Error: " + err.message;
+                }
+                trainingInProgress = false;
+            });
+
+            // --- 9. EXPORT MODEL ---
+            exportBtn.addEventListener("click", async () => {
+                if (!transferModel) return;
+                // Save model as files
+                await transferModel.save("downloads://fine-tuned-model");
+                trainingStatus.textContent = "Model exported!";
+            });
+
+            // --- 10. README / USAGE INSTRUCTIONS (at end of file) ---
+
+            /*
+    README: In-Browser Transfer Learning Web App
+    ===========================================
+
+    Features:
+    - Load pre-trained MobileNet in browser (TensorFlow.js)
+    - Classify images via upload or drag-and-drop
+    - Configure transfer learning: freeze base, add dense layers, define classes
+    - Upload labeled images for retraining
+    - Visualize loss/accuracy in real time
+    - Export fine-tuned model (JSON + weights) for later use
+
+    How to run locally:
+    1. Save this file as index.html
+    2. Start a local server (e.g. with Node.js):
+       npx http-server .
+       or
+       python3 -m http.server
+    3. Open http://localhost:8080 (or the port shown) in your browser.
+
+    Testing retraining:
+    - Enter class labels (e.g. "cat,dog").
+    - For each class, select the label and upload images.
+    - Configure dense units/epochs as desired.
+    - Click "Start Retraining".
+    - Download the model after training.
+
+    Swapping in a custom model:
+    - Convert your Keras/TF model to TensorFlow.js format (see tfjs-converter docs).
+    - Replace MobileNet loading code with:
+        const model = await tf.loadLayersModel('path/to/model.json');
+    - Adjust preprocessing as needed for your model's input shape.
+
+    Key ML Concepts Explained:
+    - Model Loading: MobileNet is loaded from CDN, used as a feature extractor.
+    - Layer Freezing: Optionally freeze base layers to retain learned features.
+    - Training Loop: Uses model.fit() with callbacks for real-time feedback.
+    - Model Export: tfjs allows saving models as JSON + binary weights in-browser.
+
+    References:
+    - TensorFlow.js docs: https://www.tensorflow.org/js/tutorials
+    - MobileNet model: https://github.com/tensorflow/tfjs-models/tree/master/mobilenet
+
+    */
+        </script>
+    </body>
+</html>
